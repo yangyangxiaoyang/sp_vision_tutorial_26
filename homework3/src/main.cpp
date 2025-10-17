@@ -1,138 +1,131 @@
-#include "io/camera.hpp"               
-#include "tasks/buff_detector.hpp"     
-#include "tasks/buff_solver.hpp"       
-#include "tools/plotter.hpp"           
-#include "tools/img_tools.hpp"         
+#include "io/camera.hpp"
+#include "tasks/buff_detector.hpp"
+#include "tasks/buff_solver.hpp"
+#include "tools/plotter.hpp"
 #include <opencv2/opencv.hpp>
 #include <iostream>
-#include <chrono>                      
-#include <nlohmann/json.hpp>          
+#include <chrono>
+#include "nlohmann/json.hpp"
 
-// 优先用视频测试
-#define USE_VIDEO 1
+// 模式切换：1=视频，0=实际相机
+const int USE_VIDEO = 0;  
 
-int main(int argc, char** argv)
+int main(int argc, char**argv)
 {
-    auto_buff::Buff_Solver buff_solver;     
-    tools::Plotter plotter;                 
+    // 组件初始化
+    auto_buff::Buff_Solver buff_solver;
+    tools::Plotter plotter;
+    auto_buff::Buff_Detector detector;  
     cv::Mat frame;
     std::chrono::steady_clock::time_point frame_timestamp;  
 
-    // 初始化Buff_Detector
-    auto_buff::Buff_Detector buff_detector;  
+    cv::VideoCapture cap;       
+    io::Camera camera(10.0, 10.0, "");  // 曝光10ms，增益10，自动识别相机
 
-    cv::VideoCapture cap;
-#if USE_VIDEO
-    // 视频输入
-    std::string video_path = "../assets/test.avi";
-    cap.open(video_path);
-    if (!cap.isOpened())
-    {
-        std::cerr << "[Fatal] 测试视频打开失败！路径：" << video_path << std::endl;
-        std::cerr << "请确认assets文件夹下存在test.avi" << std::endl;
-        return -1;
-    }
-#else
-    // 相机输入
-    double exposure_ms = 10.0;    
-    double gain = 20.0;           
-    std::string camera_vid_pid = ""; 
-    io::Camera camera(exposure_ms, gain, camera_vid_pid);
-    // 读一帧判断相机是否正常
-    camera.read(frame, frame_timestamp);
-    if (frame.empty())
-    {
-        std::cerr << "[Fatal] 相机初始化失败！请检查相机连接" << std::endl;
-        return -1;
-    }
-#endif
+    bool is_source_ready = false;
 
-    std::cout << "程序运行中，按 'q' 退出" << std::endl;
-    while (true)
-    {
+    // 初始化数据源
+    if (USE_VIDEO == 1) {
+        cap.open("../assets/test.avi");
+        is_source_ready = cap.isOpened();
+        if (!is_source_ready) {
+            std::cerr << "无法打开文件 ../assets/test.avi" << std::endl;
+            return -1;
+        }
+        std::cout << "视频模式启动成功" << std::endl;
+    } else {
+        is_source_ready = true;
+        std::cout << "相机模式启动成功，曝光：15ms，增益：10" << std::endl;
+    }
+
+    std::cout << "按 ESC 退出 | 输出：内环中心(x/y/z) + R标中心(x/y/z)" << std::endl;
+
+    while (is_source_ready) {
         // 读取帧
-#if USE_VIDEO
-        cap.read(frame); 
-#else
-        camera.read(frame, frame_timestamp); 
-#endif
-        if (frame.empty())
-        {
-            std::cerr << "[Warn] 帧为空（视频结束或相机断开）" << std::endl;
+        if (USE_VIDEO == 1) {
+            cap >> frame;
+            if (frame.empty()) {
+                std::cout << "视频播放结束" << std::endl;
+                break;
+            }
+        } else {
+            // 调用read，传入图像和时间戳
+            camera.read(frame, frame_timestamp);
+            if (frame.empty()) {
+                std::cerr << "相机读取失败，可能已断开连接" << std::endl;
+                break;
+            }
+        }
+
+        // 识别扇叶（获取1-4号点、5号中心、6号点）
+        auto fanblades = detector.detect(frame);
+        cv::Mat display_img = frame.clone();
+
+        if (!fanblades.empty()) {
+            auto& fan = fanblades[0];
+            // 提取特征点
+            if (fan.points.size() >= 6) {
+                std::vector<cv::Point2f> points_1_4;
+                for (int i = 0; i < 4; ++i) {
+                    points_1_4.push_back(fan.points[i]);
+                }
+                cv::Point2f inner_center = fan.center;  
+                cv::Point2f point6 = fan.points[5];    
+
+                // 传入解算器
+                buff_solver.setFeaturePoints(points_1_4, inner_center, point6);
+                bool success = buff_solver.solveRotationCenter3D();
+
+                if (success) {
+                    // 获取解算结果并发布
+                    auto inner_3d = buff_solver.getInnerCircleCenter3D();
+                    auto r_3d = buff_solver.getRotationCenter3D();
+
+                    nlohmann::json data;
+                    data["inner_x"] = inner_3d.x;
+                    data["inner_y"] = inner_3d.y;
+                    data["inner_z"] = inner_3d.z;
+                    data["r_x"] = r_3d.x;
+                    data["r_y"] = r_3d.y;
+                    data["r_z"] = r_3d.z;
+                    plotter.plot(data);
+
+                    // 绘制特征点
+                    for (int i = 0; i < 4; ++i) {
+                        cv::circle(display_img, points_1_4[i], 4, cv::Scalar(255,0,0), -1);
+                        cv::putText(display_img, std::to_string(i+1), 
+                                   points_1_4[i] + cv::Point2f(5,-5),
+                                   cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,0,0), 1);
+                    }
+                    cv::circle(display_img, inner_center, 5, cv::Scalar(0,255,0), -1);
+                    cv::putText(display_img, "5(中心)", inner_center + cv::Point2f(5,-5),
+                               cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,255,0), 1);
+                    cv::circle(display_img, point6, 5, cv::Scalar(0,0,255), -1);
+                    cv::putText(display_img, "6", point6 + cv::Point2f(5,-5),
+                               cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,0,255), 1);
+                }
+            }
+        } else {
+            cv::putText(display_img, "未识别到扇叶", cv::Point(10, 30),
+                       cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,0,255), 1);
+        }
+
+        // 显示图像
+        cv::resize(display_img, display_img, {}, 0.8, 0.8);  
+        cv::imshow("解算结果（相机模式）", display_img);
+
+        // 退出逻辑（按ESC键）
+        char key = cv::waitKey(10);  
+        if (key == 27) {  
+            std::cout << "用户手动退出" << std::endl;
             break;
         }
-
-        // 能量机关识别
-        std::vector<auto_buff::FanBlade> fanblades = buff_detector.detect(frame);
-        if (fanblades.empty())
-        {
-            // 未识别到，仅显示图像
-            cv::imshow("Buff Detection & Solving", frame);
-            if (cv::waitKey(30) == 'q') break;
-            continue;
-        }
-
-        // 取第一个有效扇叶
-        auto_buff::FanBlade target_fan = fanblades[0];
-        std::vector<cv::Point2f> inner_points = target_fan.points; 
-
-        // 绘制识别到的特征点
-        for (const auto& pt : inner_points)
-        {
-            cv::circle(frame, pt, 4, cv::Scalar(0, 255, 0), -1);
-        }
-
-        // 解算内环中心
-        buff_solver.setInnerFeaturePoints(inner_points);
-        bool inner_solved = buff_solver.solveInnerCircleCenter();
-        cv::Point2f inner_center(-1.0f, -1.0f); 
-        if (inner_solved)
-        {
-            inner_center = buff_solver.getInnerCircleCenter();
-            // 绘制内环中心
-            cv::circle(frame, inner_center, 6, cv::Scalar(0, 0, 255), -1);
-            cv::putText(frame, "Inner Center", inner_center + cv::Point2f(10, 10),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 255), 1);
-        }
-
-        // 解算旋转中心
-        cv::Point2f rotation_center(-1.0f, -1.0f);  
-        bool rotation_solved = false;
-        if (inner_solved)  
-        {
-            rotation_solved = buff_solver.solveRotationCenter();
-            if (rotation_solved)
-            {
-                rotation_center = buff_solver.getRotationCenter();
-                // 绘制旋转中心
-                cv::circle(frame, rotation_center, 6, cv::Scalar(255, 0, 0), -1);
-                cv::putText(frame, "R-Center", rotation_center + cv::Point2f(10, 10),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 0, 0), 1);
-            }
-        }
-
-        // PlotJuggler发布数据
-        if (inner_solved)
-        {
-            nlohmann::json plot_json;
-            plot_json["inner_center_x"] = inner_center.x;    
-            plot_json["inner_center_y"] = inner_center.y;    
-            if (rotation_solved)
-            {
-                plot_json["rotation_center_x"] = rotation_center.x;  
-                plot_json["rotation_center_y"] = rotation_center.y;  
-            }
-            plotter.plot(plot_json); 
-        }
-
-        cv::imshow("Buff Detection & Solving", frame);
-        if (cv::waitKey(30) == 'q') break;
     }
 
-#if USE_VIDEO
-    cap.release();
-#endif
+    // 资源释放
+    if (USE_VIDEO == 1) {
+        cap.release();  
+    }
     cv::destroyAllWindows();
-    std::cout << "程序退出" << std::endl;
     return 0;
 }
