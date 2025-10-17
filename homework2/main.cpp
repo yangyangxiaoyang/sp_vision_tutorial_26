@@ -7,7 +7,7 @@ int main()
 {
     myCamera camera;
     
-    auto_aim::YOLO yolo("./configs/yolo.yaml"); 
+    auto_aim::YOLO yolo("../configs/yolo.yaml"); 
 
     cv::Mat img;
     while (true) {
