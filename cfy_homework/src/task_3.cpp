@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <opencv2/opencv.hpp>
 #include <nlohmann/json.hpp>
 #include <memory>
@@ -35,7 +37,8 @@ Plan planning(const Target& target, const Eigen::Quaterniond& gimbal_quat) {
 
   // 关键参数（可根据实际场景调整）
   const double rotate_angle_thresh = 0.1f;    // 装甲板与云台夹角阈值（弧度）
-  const double omega_stable_thresh = 0.3f;    // 角速度稳定性阈值
+  const double omega_stable_thresh = 0.05f;   // 角速度稳定性阈值（降低以要求更稳定的omega）
+  const int stable_frame_threshold = 5;       // 角速度稳定所需连续帧数
   const double predict_time = 0.05;           // 预测未来时间（考虑系统延迟）
 
   // 预测装甲板未来状态（补偿系统延迟）
@@ -47,11 +50,32 @@ Plan planning(const Target& target, const Eigen::Quaterniond& gimbal_quat) {
   float fitted_omega = std::fabs(ekf_x[7]);  // 旋转角速度
   auto predicted_armors = target_future.armor_xyza_list();  // 未来装甲板位置和角度
 
-  // 旋转稳定性判断（角速度变化率）
-  static float last_omega = 0;
-  float omega_diff = std::fabs(fitted_omega - last_omega);
-  last_omega = fitted_omega;
-  bool is_omega_stable = (omega_diff < omega_stable_thresh);
+  // 旋转稳定性判断（多帧持续稳定检查）
+  static std::deque<float> omega_history;    // 保存历史角速度
+  static int stable_count = 0;               // 连续稳定帧计数
+  
+  omega_history.push_back(fitted_omega);
+  if (omega_history.size() > stable_frame_threshold) {
+    omega_history.pop_front();
+  }
+  
+  // 检查历史窗口内的角速度是否稳定（变化率小于阈值）
+  bool is_omega_stable = false;
+  if (omega_history.size() >= stable_frame_threshold) {
+    float max_omega = *std::max_element(omega_history.begin(), omega_history.end());
+    float min_omega = *std::min_element(omega_history.begin(), omega_history.end());
+    float omega_range = max_omega - min_omega;
+    
+    if (omega_range < omega_stable_thresh) {
+      stable_count++;
+      if (stable_count >= stable_frame_threshold) {
+        is_omega_stable = true;
+      }
+    } else {
+      stable_count = 0;
+      is_omega_stable = false;
+    }
+  }
 
   // 计算云台朝向（从四元数转换为欧拉角）
   Eigen::Vector3d gimbal_euler = tools::eulers(gimbal_quat, 2, 1, 0, false);
@@ -195,13 +219,14 @@ int main(int argc, char* argv[]) {
         }
 
         // 稳定等待期结束后，执行开火逻辑
+        bool should_fire = false;
         if (timestamp - first_converged_time > wait_time) {
           Plan plan = planning(*target_ptr, gimbal_quat);  // 传入云台姿态进行开火判断
 
           // 检查开火间隔，避免频繁触发
           if (plan.fire && (timestamp - last_send_time > send_interval)) {
             SPDLOG_INFO("装甲板旋转到位，触发开火");
-            gimbal.send(1, 1, fixed_yaw, fixed_pitch);  // 保持云台固定，发送开火信号
+            should_fire = true;
             last_send_time = timestamp;
             plot_data["fire_triggered"] = true;
           } else {
@@ -215,6 +240,12 @@ int main(int argc, char* argv[]) {
                        wait_time - (timestamp - first_converged_time)
                      ).count());
         }
+        
+        // 持续发送云台控制命令以保持固定位置，根据should_fire决定是否开火
+        gimbal.send(true, should_fire, fixed_yaw, fixed_pitch);
+      } else {
+        // EKF未收敛时，也要保持云台固定位置
+        gimbal.send(true, false, fixed_yaw, fixed_pitch);
       }
 
       // EKF发散处理
@@ -226,7 +257,7 @@ int main(int argc, char* argv[]) {
       }
 
     } else {
-      // 无目标时重置状态
+      // 无目标时重置状态，但保持云台固定位置
       if (ekf_initialized) {
         SPDLOG_INFO("未检测到装甲板，重置EKF");
         target_ptr.reset();
@@ -235,6 +266,9 @@ int main(int argc, char* argv[]) {
       }
       plot_data["fire_triggered"] = false;
       plot_data["converged"] = false;
+      
+      // 即使无目标也要保持云台固定位置
+      gimbal.send(true, false, fixed_yaw, fixed_pitch);
     }
 
     // 数据可视化与图像显示
