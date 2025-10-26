@@ -82,7 +82,7 @@ void Target::predict(double dt)
   // Piecewise White Noise Model for translation
   double v1, v2;
 
-  v1 = 1;    // 加速度方差
+  v1 = 1;     // 加速度方差
   v2 = 0.05;  // 角加速度方差
 
   auto a = dt * dt * dt * dt / 4.0;
