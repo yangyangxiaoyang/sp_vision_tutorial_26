@@ -38,7 +38,7 @@ Plan planning(const Target& target, const Eigen::Quaterniond& gimbal_quat) {
   // 关键参数（可根据实际场景调整）
   const double rotate_angle_thresh = 0.1f;    // 装甲板与云台夹角阈值（弧度）
   const double omega_stable_thresh = 0.05f;   // 角速度稳定性阈值（降低以要求更稳定的omega）
-  const int stable_frame_threshold = 5;       // 角速度稳定所需连续帧数
+  const size_t stable_frame_threshold = 5;    // 角速度稳定所需连续帧数
   const double predict_time = 0.05;           // 预测未来时间（考虑系统延迟）
 
   // 预测装甲板未来状态（补偿系统延迟）
@@ -52,16 +52,16 @@ Plan planning(const Target& target, const Eigen::Quaterniond& gimbal_quat) {
 
   // 旋转稳定性判断（多帧持续稳定检查）
   static std::deque<float> omega_history;    // 保存历史角速度
-  static int stable_count = 0;               // 连续稳定帧计数
+  static size_t stable_count = 0;            // 连续稳定帧计数
   
   omega_history.push_back(fitted_omega);
-  if (omega_history.size() > static_cast<size_t>(stable_frame_threshold)) {
+  if (omega_history.size() > stable_frame_threshold) {
     omega_history.pop_front();
   }
   
   // 检查历史窗口内的角速度是否稳定（变化率小于阈值）
   bool is_omega_stable = false;
-  if (omega_history.size() >= static_cast<size_t>(stable_frame_threshold)) {
+  if (omega_history.size() >= stable_frame_threshold) {
     float max_omega = *std::max_element(omega_history.begin(), omega_history.end());
     float min_omega = *std::min_element(omega_history.begin(), omega_history.end());
     float omega_range = max_omega - min_omega;
