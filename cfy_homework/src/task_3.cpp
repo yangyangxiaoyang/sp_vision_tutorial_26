@@ -97,7 +97,7 @@ int main(int argc, char* argv[]) {
   // EKF初始协方差
   const Eigen::VectorXd ekf_P0_dig{{1, 10, 1, 10, 1, 10, 5, 50, 10, 0.1, 0.1, 0.1}};
   const auto wait_time = 10s;        
-  const auto send_interval = 0.7s;  
+  const auto send_interval = 0.5s;  
 
   // 去抖参数
   const int init_detect_threshold = 4;       // 连续检测帧数才初始化EKF
