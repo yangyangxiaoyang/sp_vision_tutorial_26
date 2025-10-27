@@ -44,33 +44,37 @@ int main(int argc, char * argv[]){
 
   // 主循环变量
   cv::Mat frame;
-  Eigen::Quaterniond quaternion;
+  Eigen::Quaterniond gimbal_quat;
   std::chrono::steady_clock::time_point timestamp;
   nlohmann::json plot_data;
 
   // 主控制循环
   while (!exiter.exit()) {
     camera.read(frame, timestamp);
-    quaternion = gimbal.q(timestamp);
+    gimbal_quat = gimbal.q(timestamp);
     
     // 检测装甲板
     std::list<auto_aim::Armor> detected_armors = yolo.detect(frame);
-    
-    // 检测到装甲板且云台处于自瞄模式
     bool has_target = !detected_armors.empty();
     bool is_auto_aim_mode = (gimbal.mode() == io::GimbalMode::AUTO_AIM);
-    
-    if (has_target && is_auto_aim_mode) {
-      solver.set_R_gimbal2world(quaternion);
-      auto_aim::Armor & target_armor = detected_armors.front();
+    auto_aim::Armor* target_armor_ptr = nullptr;
+
+    if (has_target) {
+      target_armor_ptr = &detected_armors.front(); 
+    }
+
+    // 目标有效且云台处于自瞄模式
+    if (target_armor_ptr != nullptr && is_auto_aim_mode) {
+      auto_aim::Armor& target_armor = *target_armor_ptr;
 
       // 求解目标位置
+      solver.set_R_gimbal2world(gimbal_quat);
       solver.solve(target_armor);
-      Eigen::Vector3d target_position = target_armor.xyz_in_world;
+      Eigen::Vector3d target_pos = target_armor.xyz_in_world;
 
       // 计算云台控制角度
-      auto [yaw_control, pitch_control] = calculate_gimbal_angles(target_position);
-      
+      auto [yaw_control, pitch_control] = calculate_gimbal_angles(target_pos);
+
       // 发送控制命令
       gimbal.send(1, 0, yaw_control, pitch_control);
 
